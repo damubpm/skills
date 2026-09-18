@@ -1,0 +1,10 @@
+interface:
+  display_name: DamuBPM Development
+  short_description: DamuBPM backend, frontend, Flutter and database standards
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true
