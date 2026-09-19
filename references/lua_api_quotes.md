@@ -4,7 +4,7 @@
 
 Практический справочник Lua-вызовов функций, зарегистрированных Go-окружением. Для каждой функции отдельно указаны входящие параметры и все возвращаемые переменные в фактическом порядке. В каждом примере после вызова явно выводятся значения результирующих переменных через `print(...)`. Для SQL-функций количество значений после SQL соответствует количеству `?`-плейсхолдеров и их порядку.
 
-**Всего функций:** 210
+**Всего функций:** 211
 
 ## Оглавление
 
@@ -99,6 +99,7 @@
 - [JsonToString](#JsonToString)
 - [JsonToStringIndent](#JsonToStringIndent)
 - [JsonToXML](#JsonToXML)
+- [MarkdownToHTML](#MarkdownToHTML)
 - [StringToJson](#StringToJson)
 - [ToCP1048](#ToCP1048)
 - [XmlPathParse](#XmlPathParse)
@@ -7671,6 +7672,77 @@ else
 end
 
 -- Значения всех результирующих переменных
+print("err:", err)
+print("code:", code)
+-- /Значения всех результирующих переменных
+```
+
+[↑ К оглавлению](#оглавление)
+
+---
+
+<a id="MarkdownToHTML"></a>
+## MarkdownToHTML
+
+**Категория:** Форматы и кодирование
+
+Преобразует Markdown-текст в HTML.
+
+### Сигнатура
+
+```lua
+result, err, code = MarkdownToHTML(param1)
+```
+
+### Входящие параметры
+
+| # | Параметр | Тип | Описание |
+| --- | --- | --- | --- |
+| 1 | param1 | string | Markdown-текст для преобразования в HTML. |
+
+### Результирующие параметры (возвращаемые переменные)
+
+| # | Параметр | Тип | Описание |
+| --- | --- | --- | --- |
+| 1 | result | string | HTML, сформированный из Markdown. При ошибке возвращается пустая строка. |
+| 2 | err | string | Пустая строка при успехе; текст ошибки преобразования при неуспехе. |
+| 3 | code | integer | 0 при успехе; 1 при ошибке преобразования. |
+
+### Примеры
+
+#### Пример 1
+
+```lua
+local markdown = "# Заголовок\n\nТекст **жирным** шрифтом."
+local result, err, code = MarkdownToHTML(markdown)
+
+if code ~= 0 then
+  print("error:", err, "code:", code)
+else
+  print("html:", result)
+end
+
+-- Значения всех результирующих переменных
+print("result:", result)
+print("err:", err)
+print("code:", code)
+-- /Значения всех результирующих переменных
+```
+
+#### Пример 2
+
+```lua
+local markdown = "## Список\n\n- Первый пункт\n- Второй пункт"
+local result, err, code = MarkdownToHTML(markdown)
+
+if code ~= 0 then
+  print("error:", err, "code:", code)
+else
+  print("html:", result)
+end
+
+-- Значения всех результирующих переменных
+print("result:", result)
 print("err:", err)
 print("code:", code)
 -- /Значения всех результирующих переменных
