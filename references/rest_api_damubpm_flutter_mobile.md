@@ -39,6 +39,9 @@
 12. [Авторизация и headers](#12-авторизация-и-headers)
 13. [Mobile BPM Flow](#13-mobile-bpm-flow)
 14. [Checklist](#14-checklist)
+15. [Проверенные практики мобильных проектов](#15-проверенные-практики-мобильных-проектов)
+
+> Полное руководство по модулю `flt` (проект, OAuth2 PKCE, MapLibre, разрешения, CI/CD iOS, известные ошибки): `damubpm_flutter_mobile_guide.md`.
 
 ---
 
@@ -677,7 +680,7 @@ class DamuApiClient {
         ...defaultHeaders,
         ...?headers,
       },
-    );
+    ).timeout(const Duration(seconds: 25));
 
     return _decode(response);
   }
@@ -696,7 +699,7 @@ class DamuApiClient {
         ...?headers,
       },
       body: jsonEncode(body),
-    );
+    ).timeout(const Duration(seconds: 25));
 
     return _decode(response);
   }
@@ -715,7 +718,7 @@ class DamuApiClient {
         ...?headers,
       },
       body: jsonEncode(body),
-    );
+    ).timeout(const Duration(seconds: 25));
 
     return _decode(response);
   }
@@ -723,10 +726,11 @@ class DamuApiClient {
   Map<String, dynamic> _decode(
     http.Response response,
   ) {
+    // Не response.body: без charset в Content-Type кириллица ломается.
     final dynamic decoded =
-        response.body.isEmpty
+        response.bodyBytes.isEmpty
             ? <String, dynamic>{}
-            : jsonDecode(response.body);
+            : jsonDecode(utf8.decode(response.bodyBytes));
 
     if (response.statusCode < 200 ||
         response.statusCode >= 300) {
@@ -1069,6 +1073,20 @@ final result = await api.postJson(
 ```
 
 > Не рекомендуется хранить привилегированный API Key прямо в исходниках мобильного приложения.
+>
+> Для приложений сотрудников API Key не используется: вход — OAuth2 Authorization Code + PKCE через REST `<mod>_mobile_oauth_authorize` / `_token`, далее каждый запрос с `Authorization: Bearer <access_token>`. Сервер видит пользователя в `request.user_id` и проверяет его роли. См. раздел 15 и `damubpm_flutter_mobile_guide.md`.
+
+## Bearer-токен мобильного пользователя
+
+```dart
+final result = await api.postJson(
+  '/restapi/services/run/map_api',
+  {'action': 'config', 'data': {}},
+  headers: {'Authorization': 'Bearer $accessToken'},
+);
+```
+
+Access-токен живёт 15 минут. На 401 клиент один раз обновляет его через `grant_type=refresh_token` и повторяет запрос.
 
 ---
 
@@ -1168,7 +1186,69 @@ task
 - [ ] response JSON имеет единый формат;
 - [ ] обработаны 400/401/404/409;
 - [ ] Flutter client имеет timeout/retry стратегию проекта;
-- [ ] проверены ошибочные сценарии.
+- [ ] проверены ошибочные сценарии;
+- [ ] ответ декодируется через `utf8.decode(response.bodyBytes)`;
+- [ ] списки в Lua-ответах собраны через `array({})`;
+- [ ] числа и флаги разбираются терпимо (могут прийти строками);
+- [ ] изменения данных идут через `<mod>_bp` → бизнес-процесс с белым списком;
+- [ ] вход — OAuth2 PKCE, токены в `flutter_secure_storage`;
+- [ ] проверены операции записи, а не только чтение.
+
+---
+
+# 15. Проверенные практики мобильных проектов
+
+Практики из рабочих приложений `map-bapps`, `grc-mobile`, `dlv-mobile`, `contact-center-mobile`.
+
+## Настройки REST-сервисов
+
+| Сервис | is_public | only_auth | cut_status_info | Метод |
+|---|---|---|---|---|
+| `<mod>_mobile_oauth_authorize` | 1 | 0 | 1 | GET, HTML |
+| `<mod>_mobile_oauth_token` | 1 | 0 | 1 | POST form |
+| `<mod>_mobile_oauth_logout` | 0 | 1 | 1 | POST |
+| `<mod>_api` / `<mod>_m_api` | 0 | 1 | 1 | POST JSON |
+| `<mod>_bp` | 0 | 1 | 1 | POST JSON |
+
+`cut_status_info = 1` убирает служебную обёртку платформы, и клиент получает ровно `output`.
+
+## Единый конверт ответа
+
+```json
+{"success": true, "data": {}}
+{"success": false, "error": {"code": "BP_ERROR", "message": "Текст для пользователя", "field": "phone"}}
+```
+
+Исключение — OAuth `token`: стандартный ответ `{"access_token", "refresh_token", "token_type", "expires_in", "scope"}` и ошибки `{"error", "error_description"}`.
+
+Если сервис упал на уровне платформы, текст ошибки приходит в `resultText` — клиент должен показывать его, когда `error` пуст.
+
+## Коды HTTP, которые реально используются
+
+| HTTP | Когда |
+|---:|---|
+| 400 | неверные параметры, неизвестный процесс (`UNKNOWN_PROCESS`), `invalid_grant` |
+| 401 | нет или истёк Bearer — клиент обновляет токен один раз |
+| 403 | нет роли модуля — показать «попросите администратора выдать роль …» |
+| 405 | неверный метод, заголовок `Allow` |
+| 422 | бизнес-ошибка процесса (`BP_ERROR`) — текст показать пользователю |
+| 429 | лимит, заголовок `Retry-After` |
+| 500 | процесс не запустился, ошибка commit |
+| 503 | временная недоступность хранилища OAuth |
+
+## Чтение и запись
+
+- Чтение — один диспетчер `POST {action, data}` в `<mod>_api`, логика в `pkg/<mod>_mobile`.
+- Запись — `POST {process, data}` в `<mod>_bp` → `BPMSStartProcess(process, uid, {input = JsonToString(data)})`, белый список процессов, `last_error` → 422, `Commit()` только в REST и с проверкой кода. В скрипте БП `Commit()`/`Rollback()` не вызывать.
+
+## Типовые ошибки
+
+- Кириллица «кракозябрами» → `response.body` вместо `utf8.decode(response.bodyBytes)`.
+- `type '_Map<String, dynamic>' is not a subtype of 'List'` → Lua-массив сериализован без `array()`, пустой список пришёл как `{}`.
+- `type 'String' is not a subtype of 'int'` → числа из SQL пришли строками; использовать `intv()` / `numv()`.
+- Координаты округлены до 0,01° → атрибут типа `double` (`numeric(20,2)`); хранить `varchar(32)`.
+- После входа на iOS возврат на экран входа → не зарегистрирована схема или не выключен `FlutterDeepLinkingEnabled`.
+- Повторное списание/отправка после таймаута → нет `client_request_uuid` для идемпотентности.
 
 ---
 
