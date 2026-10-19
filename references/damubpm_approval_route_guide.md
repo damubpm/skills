@@ -556,6 +556,8 @@ update pages_ui_blocks_n set block_id = 3034 where id = 18834;
 }
 ```
 
+`header_title` у блоков `tabview_tab` обязателен — это текст ярлыка вкладки (см. 5.6).
+
 2. Связи (все типа `block`):
 
 ```json
@@ -587,8 +589,61 @@ order by b.id, n.nn;
 
 Другие готовые блоки для вкладок документа: `task_eds_files` (Подписанные файлы), `its_link` (Связанные документы), `log_rows` (История), `global_msg` (Обсуждение и файлы), `files_for_preview` (Предпросмотр), `changes` (Изменение документа).
 
-### 5.6 Условия и частые ошибки
+### 5.6 Заголовки вкладок и блоков
 
+Текст ярлыка вкладки и заголовок панели берутся **только** из `pages_ui_blocks.header_title`. Поле `title` — служебное имя блока в настройках, на экран как заголовок не выводится. Если `header_title` пуст, шаблон просто не выводит атрибут `header` — вкладка получается без надписи (пустой ярлык), панель — без заголовка. Ошибки при генерации нет.
+
+| ui_block_tpl | Что выводится из `header_title` | Если пусто |
+|---|---|---|
+| `tabview_tab` | `<p-tabPanel header="…">` — текст ярлыка вкладки | пустой ярлык |
+| `panel_block` | `<h5 translate="…">` над панелью | панель без заголовка |
+| `default_page`, `default`, `default_page_view` | `<h4>…</h4>` над блоком | блок без заголовка (нормально для служебных обёрток) |
+| `tabview` | не используется | — |
+| `task_approve_task`, `task_approve_hst`, `its_link`, `task_eds_files`, `files_for_preview` | не используется — заголовок зашит в шаблон («Маршрут документа», «Ход исполнения», «Связанные документы») | — |
+
+Правила:
+
+- У каждого блока `tabview_tab` обязательно заполнять `header_title` (в `add_page_ui_blocks` — поле `header_title`, не только `title`). Удобно делать `title` и `header_title` одинаковыми, как в its_d_statements и its_d_company_check.
+- У блоков содержимого (`panel_block`, `default_page` внутри вкладки) `header_title` заполнять, если нужен заголовок секции («Основные реквизиты», «Сведения о компании»); у служебных обёрток оставлять пустым, чтобы не дублировать ярлык вкладки.
+- Текст заголовка `panel_block` проходит через `translate` — для казахского/английского интерфейса добавить перевод (`create_translates`).
+- Шаблон `tabview_tab` подставляет `title` вкладки в атрибуты внутри неё как их `header_title` — поэтому `title` вкладки тоже заполнять осмысленно.
+
+Найти пустые заголовки на странице:
+
+```sql
+select b.id, b.code, ubt.code tpl, b.title, b.header_title
+from pages_ui_blocks b
+join pages p on p.id = b.pages_id
+join ui_block_tpl ubt on ubt.id = b.ui_block_tpl_id
+where p.code = 'its_d_company_checkdetails'
+  and ubt.code in ('tabview_tab','panel_block')
+  and coalesce(b.header_title,'') = '';
+```
+
+Исправить (взять из `title`) и перегенерировать страницу:
+
+```sql
+update pages_ui_blocks b set header_title = b.title
+from pages p, ui_block_tpl ubt
+where p.id = b.pages_id and ubt.id = b.ui_block_tpl_id
+  and p.code = 'its_d_company_checkdetails'
+  and ubt.code = 'tabview_tab'
+  and coalesce(b.header_title,'') = '' and coalesce(b.title,'') <> '';
+```
+
+Проверить, что заголовки попали в сгенерированную страницу:
+
+```sql
+select (select string_agg(m[1], ' | ')
+          from regexp_matches(p.angular_template, 'header=.([^"]*).', 'g') m) headers
+from pages p where p.code = 'its_d_company_checkdetails';
+```
+
+Ожидаемо: `Главная | Предпросмотр | Маршрут | Ход исполнения | Связанные документы`. Если в `pages_ui_blocks` заголовки есть, а здесь нет — страница не перегенерирована; если и здесь есть, а в браузере пусто — обновить страницу без кэша.
+
+### 5.7 Условия и частые ошибки
+
+- Вкладка без надписи — у блока `tabview_tab` пустой `header_title` (заполнен только `title`), см. 5.6.
 - Скрыть вкладку по полю записи — `ng_if` у блока `tabview_tab` (например `detail['type_id$code'] == 'leave'`); скрыть совсем — `1==0`, как у «Предпросмотр».
 - Вкладка «Маршрут» пустая на новой записи — у сущности нет `entities.task_approve_t_id` и записи ещё не создан маршрут визардом.
 - «Ход исполнения» пустой — workflow не запускался (у задач нет `status_id`), это нормально.
