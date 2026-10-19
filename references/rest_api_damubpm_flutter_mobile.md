@@ -25,6 +25,7 @@
 
 ## Содержание
 
+0. [Выбор API для Flutter](#0-выбор-api-для-flutter)
 1. [Общая схема REST API](#1-общая-схема-rest-api)
 2. [Lua REST Services](#2-lua-rest-services)
 3. [Объект request](#3-объект-request)
@@ -39,9 +40,126 @@
 12. [Авторизация и headers](#12-авторизация-и-headers)
 13. [Mobile BPM Flow](#13-mobile-bpm-flow)
 14. [Checklist](#14-checklist)
-15. [Проверенные практики мобильных проектов](#15-проверенные-практики-мобильных-проектов)
 
-> Полное руководство по модулю `flt` (проект, OAuth2 PKCE, MapLibre, разрешения, CI/CD iOS, известные ошибки): `damubpm_flutter_mobile_guide.md`.
+---
+
+# 0. Выбор API для Flutter
+
+Перед тем как писать запрос из мобильного приложения, определить тип операции:
+
+| Операция | API | Когда |
+|---|---|---|
+| Обычная DML: создать, изменить, удалить запись | `POST /update_v_1_1` | Запись одной сущности без бизнес-правил сверх тех, что уже есть в entityEvent-БП сущности |
+| Получение списков, справочников, карточки | `GET /query/get?code=<код query>` | Любое чтение: список, поиск, выбор из справочника, данные карточки |
+| Сложная логика изменения | БП `entityActionByID` / `entityTool` через `POST /restapi/bpms/start` | Несколько сущностей, проверки, смена статуса, расчёты, интеграции, отправка уведомлений |
+
+Свой Lua REST (`/restapi/services/run/<code>`) — только если этих трёх путей не хватает: агрегированный ответ из нескольких источников за один запрос, публичный сервис, OAuth.
+
+## 0.1 DML — update_v_1_1
+
+Создание:
+
+```json
+{"items":[{"table_name":"cln_orders","action":"insert",
+  "values":[{"sys$uuid":"<uuid v4>","id":0,"title":"Заказ","client_id":15}]}]}
+```
+
+Изменение — по `id`, передаются только меняемые поля:
+
+```json
+{"items":[{"table_name":"cln_orders","action":"update",
+  "values":[{"id":125,"status_id":3,"comment":"Перезвонить"}]}]}
+```
+
+Удаление:
+
+```json
+{"items":[{"table_name":"cln_orders","action":"delete","values":[{"id":125}]}]}
+```
+
+Ответ: `error` (0 — успех), `error_text`, `items[]` с `table_name` и `last_insert_id`. При `error != 0` показывать `error_text` пользователю.
+
+- `table_name` — код сущности, поля — коды атрибутов.
+- Права проверяет платформа по `entity_grants` (`is_insert` / `is_update` / `is_delete`); роли мобильного пользователя нужны соответствующие гранты.
+- entityEvent-БП сущности (upsert/delete) срабатывают так же, как при сохранении формы на вебе.
+- Для новой записи генерировать `sys$uuid` на клиенте (пакет `uuid`), `id: 0`.
+
+```dart
+Future<int> insertRow(String entity, Map<String, dynamic> values) async {
+  final r = await api.post('/update_v_1_1', {
+    'items': [
+      {'table_name': entity, 'action': 'insert',
+       'values': [{'sys\$uuid': const Uuid().v4(), 'id': 0, ...values}]}
+    ]
+  });
+  if ((r['error'] ?? 0) != 0) throw ApiException(r['error_text'] ?? 'Ошибка');
+  final it = (r['items'] as List? ?? [])
+      .firstWhere((e) => e['table_name'] == entity, orElse: () => null);
+  return int.tryParse('${it?['last_insert_id'] ?? r['last_insert_id'] ?? 0}') ?? 0;
+}
+
+Future<void> updateRow(String entity, int id, Map<String, dynamic> values) async {
+  final r = await api.post('/update_v_1_1', {
+    'items': [{'table_name': entity, 'action': 'update', 'values': [{'id': id, ...values}]}]
+  });
+  if ((r['error'] ?? 0) != 0) throw ApiException(r['error_text'] ?? 'Ошибка');
+}
+```
+
+## 0.2 Списки — query/get
+
+```http
+GET /query/get?code=cln_orders_mobile&page=1&perpage=50
+```
+
+Ответ: `items[]`, `allCount`, `pageCount`.
+
+- Для приложения создавать отдельный query (`<entity>_mobile`, `<mod>_<что>_m`) с нужными колонками, а не тянуть веб-query с лишними полями.
+- `perpage=0` — без пагинации (только для коротких справочников).
+- Фильтры, сортировка и `param1`/`param2` — те же поля, что у `QueryOptions` (см. `damubpm_query_guide.md`); алиасы фильтров должны быть в метаданных query.
+- Права строк применяются автоматически (`entity_grants.is_list_view` + `entity_view_limits`); без гранта список пустой, это не ошибка. `is_public = 1` для мобильных query не ставить.
+- `:user_id` и `:lang` в SQL query подставляет сервер — не передавать их с клиента.
+
+```dart
+Future<List<Map<String, dynamic>>> query(String code,
+    {int page = 1, int perpage = 50, Map<String, String> params = const {}}) async {
+  final r = await api.get('/query/get', {
+    'code': code, 'page': '$page', 'perpage': '$perpage', ...params,
+  });
+  return rows(r['items']);
+}
+```
+
+## 0.3 Сложная логика — БП entityActionByID / entityTool
+
+- `entityActionByID` — действие над конкретной записью (кнопка в карточке): «Провести», «Отменить», «Оплатить», «Закрыть смену». Вход — `id` записи.
+- `entityTool` — инструмент сущности без конкретной записи: «Новый заказ по шаблону», «Импорт», «Пересчитать остатки».
+- Процесс должен быть полностью автоматическим (без UserTask) или клиент обязан пройти его задачи через `runUserTaskByTask` (раздел 13).
+- Выходные переменные: `result`, `last_error`; клиент проверяет `ok`, `errorText` и `output.last_error`.
+- Роли: процессу нужна строка в `bp_process_roles` (`can_run = 1`) для ролей мобильного пользователя.
+- Внутри скрипта проверять права на запись: `CheckGrantOfEntity(sys.user_id, entity, 'is_update', id)`.
+
+```http
+POST /restapi/bpms/start
+{"processCode":"cln_orders_close","input":{"id":125}}
+```
+
+```dart
+Future<Map<String, dynamic>> runAction(String process, Map<String, dynamic> input) async {
+  final r = await api.post('/restapi/bpms/start', {'processCode': process, 'input': input});
+  final out = (r['output'] as Map?)?.cast<String, dynamic>() ?? {};
+  final err = '${r['errorText'] ?? ''}'.isNotEmpty ? '${r['errorText']}' : '${out['last_error'] ?? ''}';
+  if (r['ok'] != true || err.isNotEmpty) throw ApiException(err.isEmpty ? 'Ошибка процесса' : err);
+  return out;
+}
+```
+
+## 0.4 Как выбрать
+
+1. Меняется одна запись, достаточно сохранить поля → `update_v_1_1`.
+2. Нужно прочитать → `query/get`.
+3. Изменение затрагивает несколько записей, должно пройти проверки, поменять статус или вызвать внешний сервис → БП. Ту же кнопку на вебе вешать на этот же БП, чтобы правила были в одном месте.
+4. Ничего из перечисленного не подходит → свой Lua REST.
 
 ---
 
@@ -680,7 +798,7 @@ class DamuApiClient {
         ...defaultHeaders,
         ...?headers,
       },
-    ).timeout(const Duration(seconds: 25));
+    );
 
     return _decode(response);
   }
@@ -699,7 +817,7 @@ class DamuApiClient {
         ...?headers,
       },
       body: jsonEncode(body),
-    ).timeout(const Duration(seconds: 25));
+    );
 
     return _decode(response);
   }
@@ -718,7 +836,7 @@ class DamuApiClient {
         ...?headers,
       },
       body: jsonEncode(body),
-    ).timeout(const Duration(seconds: 25));
+    );
 
     return _decode(response);
   }
@@ -726,11 +844,10 @@ class DamuApiClient {
   Map<String, dynamic> _decode(
     http.Response response,
   ) {
-    // Не response.body: без charset в Content-Type кириллица ломается.
     final dynamic decoded =
-        response.bodyBytes.isEmpty
+        response.body.isEmpty
             ? <String, dynamic>{}
-            : jsonDecode(utf8.decode(response.bodyBytes));
+            : jsonDecode(response.body);
 
     if (response.statusCode < 200 ||
         response.statusCode >= 300) {
@@ -1073,20 +1190,6 @@ final result = await api.postJson(
 ```
 
 > Не рекомендуется хранить привилегированный API Key прямо в исходниках мобильного приложения.
->
-> Для приложений сотрудников API Key не используется: вход — OAuth2 Authorization Code + PKCE через REST `<mod>_mobile_oauth_authorize` / `_token`, далее каждый запрос с `Authorization: Bearer <access_token>`. Сервер видит пользователя в `request.user_id` и проверяет его роли. См. раздел 15 и `damubpm_flutter_mobile_guide.md`.
-
-## Bearer-токен мобильного пользователя
-
-```dart
-final result = await api.postJson(
-  '/restapi/services/run/map_api',
-  {'action': 'config', 'data': {}},
-  headers: {'Authorization': 'Bearer $accessToken'},
-);
-```
-
-Access-токен живёт 15 минут. На 401 клиент один раз обновляет его через `grant_type=refresh_token` и повторяет запрос.
 
 ---
 
@@ -1170,7 +1273,8 @@ task
 
 - [ ] используется HTTPS;
 - [ ] определён `baseUrl`;
-- [ ] используется `/restapi/services/run/<code>`;
+- [ ] DML — `update_v_1_1`, списки — `query/get`, сложная логика — БП `entityActionByID`/`entityTool`;
+- [ ] свой `/restapi/services/run/<code>` — только когда стандартных путей не хватает;
 - [ ] JSON отправляется с `Content-Type: application/json`;
 - [ ] проверяется HTTP status;
 - [ ] ошибки сервера обрабатываются отдельно;
@@ -1186,69 +1290,7 @@ task
 - [ ] response JSON имеет единый формат;
 - [ ] обработаны 400/401/404/409;
 - [ ] Flutter client имеет timeout/retry стратегию проекта;
-- [ ] проверены ошибочные сценарии;
-- [ ] ответ декодируется через `utf8.decode(response.bodyBytes)`;
-- [ ] списки в Lua-ответах собраны через `array({})`;
-- [ ] числа и флаги разбираются терпимо (могут прийти строками);
-- [ ] изменения данных идут через `<mod>_bp` → бизнес-процесс с белым списком;
-- [ ] вход — OAuth2 PKCE, токены в `flutter_secure_storage`;
-- [ ] проверены операции записи, а не только чтение.
-
----
-
-# 15. Проверенные практики мобильных проектов
-
-Практики из рабочих приложений `map-bapps`, `grc-mobile`, `dlv-mobile`, `contact-center-mobile`.
-
-## Настройки REST-сервисов
-
-| Сервис | is_public | only_auth | cut_status_info | Метод |
-|---|---|---|---|---|
-| `<mod>_mobile_oauth_authorize` | 1 | 0 | 1 | GET, HTML |
-| `<mod>_mobile_oauth_token` | 1 | 0 | 1 | POST form |
-| `<mod>_mobile_oauth_logout` | 0 | 1 | 1 | POST |
-| `<mod>_api` / `<mod>_m_api` | 0 | 1 | 1 | POST JSON |
-| `<mod>_bp` | 0 | 1 | 1 | POST JSON |
-
-`cut_status_info = 1` убирает служебную обёртку платформы, и клиент получает ровно `output`.
-
-## Единый конверт ответа
-
-```json
-{"success": true, "data": {}}
-{"success": false, "error": {"code": "BP_ERROR", "message": "Текст для пользователя", "field": "phone"}}
-```
-
-Исключение — OAuth `token`: стандартный ответ `{"access_token", "refresh_token", "token_type", "expires_in", "scope"}` и ошибки `{"error", "error_description"}`.
-
-Если сервис упал на уровне платформы, текст ошибки приходит в `resultText` — клиент должен показывать его, когда `error` пуст.
-
-## Коды HTTP, которые реально используются
-
-| HTTP | Когда |
-|---:|---|
-| 400 | неверные параметры, неизвестный процесс (`UNKNOWN_PROCESS`), `invalid_grant` |
-| 401 | нет или истёк Bearer — клиент обновляет токен один раз |
-| 403 | нет роли модуля — показать «попросите администратора выдать роль …» |
-| 405 | неверный метод, заголовок `Allow` |
-| 422 | бизнес-ошибка процесса (`BP_ERROR`) — текст показать пользователю |
-| 429 | лимит, заголовок `Retry-After` |
-| 500 | процесс не запустился, ошибка commit |
-| 503 | временная недоступность хранилища OAuth |
-
-## Чтение и запись
-
-- Чтение — один диспетчер `POST {action, data}` в `<mod>_api`, логика в `pkg/<mod>_mobile`.
-- Запись — `POST {process, data}` в `<mod>_bp` → `BPMSStartProcess(process, uid, {input = JsonToString(data)})`, белый список процессов, `last_error` → 422, `Commit()` только в REST и с проверкой кода. В скрипте БП `Commit()`/`Rollback()` не вызывать.
-
-## Типовые ошибки
-
-- Кириллица «кракозябрами» → `response.body` вместо `utf8.decode(response.bodyBytes)`.
-- `type '_Map<String, dynamic>' is not a subtype of 'List'` → Lua-массив сериализован без `array()`, пустой список пришёл как `{}`.
-- `type 'String' is not a subtype of 'int'` → числа из SQL пришли строками; использовать `intv()` / `numv()`.
-- Координаты округлены до 0,01° → атрибут типа `double` (`numeric(20,2)`); хранить `varchar(32)`.
-- После входа на iOS возврат на экран входа → не зарегистрирована схема или не выключен `FlutterDeepLinkingEnabled`.
-- Повторное списание/отправка после таймаута → нет `client_request_uuid` для идемпотентности.
+- [ ] проверены ошибочные сценарии.
 
 ---
 
@@ -1282,6 +1324,12 @@ GET /restapi/bpms/ShowInstanceAngularForm/:instance
 
 CRUD:
 POST /update_v_1_1
+
+Списки:
+GET /query/get?code=<код query>&page=1&perpage=50
+
+Сложная логика:
+POST /restapi/bpms/start  (entityActionByID / entityTool)
 ```
 
 ---
