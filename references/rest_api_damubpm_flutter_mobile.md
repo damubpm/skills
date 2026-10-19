@@ -10,7 +10,7 @@
 - BPM REST API;
 - UserTask;
 - формы BPM-задач и экземпляров;
-- `/update_v_1_1`;
+- `/restapi/update_v_1_1`;
 - JSON request/response;
 - HTTP status codes;
 - async;
@@ -49,8 +49,8 @@
 
 | Операция | API | Когда |
 |---|---|---|
-| Обычная DML: создать, изменить, удалить запись | `POST /update_v_1_1` | Запись одной сущности без бизнес-правил сверх тех, что уже есть в entityEvent-БП сущности |
-| Получение списков, справочников, карточки | `GET /query/get?code=<код query>` | Любое чтение: список, поиск, выбор из справочника, данные карточки |
+| Обычная DML: создать, изменить, удалить запись | `POST /restapi/update_v_1_1` | Запись одной сущности без бизнес-правил сверх тех, что уже есть в entityEvent-БП сущности |
+| Получение списков, справочников, карточки | `GET /restapi/query/get?code=<код query>` | Любое чтение: список, поиск, выбор из справочника, данные карточки |
 | Сложная логика изменения | БП `entityActionByID` / `entityTool` через `POST /restapi/bpms/start` | Несколько сущностей, проверки, смена статуса, расчёты, интеграции, отправка уведомлений |
 
 Свой Lua REST (`/restapi/services/run/<code>`) — только если этих трёх путей не хватает: агрегированный ответ из нескольких источников за один запрос, публичный сервис, OAuth.
@@ -86,7 +86,7 @@
 
 ```dart
 Future<int> insertRow(String entity, Map<String, dynamic> values) async {
-  final r = await api.post('/update_v_1_1', {
+  final r = await api.post('/restapi/update_v_1_1', {
     'items': [
       {'table_name': entity, 'action': 'insert',
        'values': [{'sys\$uuid': const Uuid().v4(), 'id': 0, ...values}]}
@@ -99,7 +99,7 @@ Future<int> insertRow(String entity, Map<String, dynamic> values) async {
 }
 
 Future<void> updateRow(String entity, int id, Map<String, dynamic> values) async {
-  final r = await api.post('/update_v_1_1', {
+  final r = await api.post('/restapi/update_v_1_1', {
     'items': [{'table_name': entity, 'action': 'update', 'values': [{'id': id, ...values}]}]
   });
   if ((r['error'] ?? 0) != 0) throw ApiException(r['error_text'] ?? 'Ошибка');
@@ -109,7 +109,7 @@ Future<void> updateRow(String entity, int id, Map<String, dynamic> values) async
 ## 0.2 Списки — query/get
 
 ```http
-GET /query/get?code=cln_orders_mobile&page=1&perpage=50
+GET /restapi/query/get?code=cln_orders_mobile&page=1&perpage=50
 ```
 
 Ответ: `items[]`, `allCount`, `pageCount`.
@@ -123,7 +123,7 @@ GET /query/get?code=cln_orders_mobile&page=1&perpage=50
 ```dart
 Future<List<Map<String, dynamic>>> query(String code,
     {int page = 1, int perpage = 50, Map<String, String> params = const {}}) async {
-  final r = await api.get('/query/get', {
+  final r = await api.get('/restapi/query/get', {
     'code': code, 'page': '$page', 'perpage': '$perpage', ...params,
   });
   return rows(r['items']);
@@ -665,13 +665,13 @@ GET /restapi/bpms/ShowInstanceAngularForm/INSTANCE-UUID
 Endpoint:
 
 ```text
-/update_v_1_1
+/restapi/update_v_1_1
 ```
 
 ## Insert
 
 ```http
-POST /update_v_1_1
+POST /restapi/update_v_1_1
 Content-Type: application/json
 ```
 
@@ -1003,7 +1003,7 @@ final form = await api.getJson(
 
 ```dart
 final result = await api.postJson(
-  '/update_v_1_1',
+  '/restapi/update_v_1_1',
   {
     'items': [
       {
@@ -1323,10 +1323,10 @@ Instance Angular form:
 GET /restapi/bpms/ShowInstanceAngularForm/:instance
 
 CRUD:
-POST /update_v_1_1
+POST /restapi/update_v_1_1
 
 Списки:
-GET /query/get?code=<код query>&page=1&perpage=50
+GET /restapi/query/get?code=<код query>&page=1&perpage=50
 
 Сложная логика:
 POST /restapi/bpms/start  (entityActionByID / entityTool)
